@@ -6,6 +6,8 @@
 
 一个小型 Python CLI：输入 Bilibili URL，优先提取已有字幕；没有可用字幕时，用 yt-dlp 下载音频并在本地 GPU 上转写；最后调用 OpenAI 兼容 LLM，完成分段摘要和综合整理。
 
+也支持 Ollama 原生接口，以及 LM Studio、llama.cpp 等本地 OpenAI 兼容服务，使用方式见下方“本地模型”。
+
 ```text
 Bilibili URL → 已有字幕 ───────────────────┐
              无可用字幕 → 下载音频 → 本地 ASR ├→ transcript.md
@@ -59,6 +61,35 @@ chapters.md      LLM 生成的章节、时间跳转链接和概要
 ```
 
 `summary.md` 要求模型区分作者观点与已验证事实，保留论证、案例、限定和重复内容提示。`chapters.md` 的时间戳只能取自输入逐字稿，主题边界仍可能有偏差。
+
+## 本地模型
+
+先启动本地模型服务，并下载或加载你要使用的模型。摘要和综合整理无需云端 API key。
+
+```bash
+# 查看 Ollama 已安装模型，再选择其中一个
+ollama list
+uv run biliquill URL --provider ollama --model YOUR_INSTALLED_MODEL
+
+# LM Studio：先加载模型并启动本地 API 服务
+uv run biliquill URL --provider local --model YOUR_LOADED_MODEL
+
+# llama.cpp 等其他本地 OpenAI 兼容服务
+uv run biliquill URL --provider local --model YOUR_SERVED_MODEL \
+  --base-url http://localhost:8080/v1
+
+# 中文摘要，较小的 Ollama 上下文与输入分段
+uv run biliquill URL --provider ollama --model YOUR_INSTALLED_MODEL \
+  --notes-language zh --context-size 8192 --chunk-chars 2000 --reduce-chars 4000
+```
+
+`--provider ollama` 默认连接 `http://localhost:11434/api/chat`。`--base-url` 可填写服务根地址或以 `/api` 结尾的地址。使用非流式响应，分段摘要启用 JSON 模式，最终综合仍输出 Markdown。`--context-size` 设置 Ollama 的 `num_ctx`，默认为 16384 tokens；较小的上下文需要相应减小分段和综合输入，并为输出保留空间。
+
+`--provider local` 默认连接 `http://localhost:1234/v1`，适用于提供 Chat Completions 接口的本地服务。工具通过 HTTP 调用已运行的模型服务，不会直接加载 GGUF 或 Transformers 权重，也不会自行启动服务器或下载 LLM。
+
+可设置 `BILIQUILL_PROVIDER=ollama` 或 `local` 作为默认后端。本地模式使用独立的 `BILIQUILL_OLLAMA_BASE_URL` / `BILIQUILL_LOCAL_BASE_URL` 配置，不继承云端服务地址与 API key；显式的 `--base-url` 优先。需要鉴权的本地代理可使用 `BILIQUILL_OLLAMA_API_KEY` / `BILIQUILL_LOCAL_API_KEY`。
+
+LLM 请求超时默认为 600 秒，包含首次加载模型的时间，可通过 `--llm-timeout 900` 调整。摘要在配置的本地服务中完成，获取原视频仍需要访问 Bilibili。本地模型需要能够遵循 JSON 指令并返回有效正文。
 
 ## 常用选项
 
@@ -121,6 +152,7 @@ uv build
 - [yt-dlp Python embedding](https://github.com/yt-dlp/yt-dlp#embedding-yt-dlp)
 - [faster-whisper GPU requirements](https://github.com/SYSTRAN/faster-whisper#gpu)
 - [OpenAI Docs: Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)
+- [Ollama 原生 Chat API](https://docs.ollama.com/api/chat)
 
 ## License
 

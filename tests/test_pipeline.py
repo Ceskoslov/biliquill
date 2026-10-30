@@ -171,6 +171,126 @@ def test_note_language_defaults_to_english_and_changes_cache(tmp_path):
     llm.close()
 
 
+@pytest.mark.parametrize("base_url", ["http://localhost:11434", "http://localhost:11434/api/"])
+def test_ollama_native_requests_and_response_formats(tmp_path, base_url):
+    calls = []
+
+    def handler(request):
+        calls.append(json.loads(request.content))
+        assert request.url.path == "/api/chat"
+        assert "authorization" not in request.headers
+        content = json.dumps(note()) if len(calls) == 1 else "# Summary"
+        return httpx.Response(
+            200, json={"done": True, "done_reason": "stop", "message": {"content": content}}
+        )
+
+    llm = LLM(base_url, None, "installed-model", tmp_path, provider="ollama", context_size=8192)
+    llm.client.close()
+    llm.client = httpx.Client(transport=httpx.MockTransport(handler))
+    result = llm.complete("Chunk", validate=lambda value: parse_note(value, SEGMENTS))
+    assert parse_note(result, SEGMENTS) == note()
+    assert calls[0]["format"] == "json"
+    assert calls[0]["options"] == {"num_ctx": 8192}
+    assert calls[0]["stream"] is False
+    assert llm.complete("Synthesis") == "# Summary"
+    assert "format" not in calls[1]
+    llm.close()
+
+
+@pytest.mark.parametrize("done,reason", [(False, "stop"), (True, "length")])
+def test_incomplete_ollama_responses_are_not_cached(tmp_path, monkeypatch, done, reason):
+    monkeypatch.setattr("biliquill.llm.time.sleep", lambda _: None)
+    llm = LLM("http://localhost:11434", None, "local-model", tmp_path, provider="ollama")
+    llm.client.close()
+    llm.client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(
+                200, json={"done": done, "done_reason": reason, "message": {"content": "Partial"}}
+            )
+        )
+    )
+    with pytest.raises(QuillError, match="incomplete|truncated"):
+        llm.complete("Question")
+    assert not list(tmp_path.glob("llm-*"))
+    llm.close()
+
+
+@pytest.mark.parametrize(
+    "provider,expected",
+    [("local", "http://localhost:1234/v1"), ("ollama", "http://localhost:11434")],
+)
+def test_local_providers_ignore_cloud_configuration(
+    tmp_path, fake_source, monkeypatch, provider, expected
+):
+    monkeypatch.setenv("BILIQUILL_BASE_URL", "https://cloud.test/v1")
+    monkeypatch.setenv("BILIQUILL_API_KEY", "private-cloud-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "another-cloud-key")
+    monkeypatch.delenv(f"BILIQUILL_{provider.upper()}_BASE_URL", raising=False)
+    monkeypatch.delenv(f"BILIQUILL_{provider.upper()}_API_KEY", raising=False)
+    seen = []
+    original_init = LLM.__init__
+
+    def init(self, base_url, api_key, *args, **kwargs):
+        seen.append((base_url, api_key, kwargs))
+        original_init(self, base_url, api_key, *args, **kwargs)
+
+    monkeypatch.setattr(LLM, "__init__", init)
+    monkeypatch.setattr(cli, "summarize", lambda *a, **k: ("Summary", "Chapters"))
+    assert (
+        cli.main([URL, "-o", str(tmp_path), "--provider", provider, "--model", "installed-model"])
+        == 0
+    )
+    assert seen[0][0] == expected
+    assert seen[0][1] is None
+    assert seen[0][2]["provider"] == provider
+
+
+def test_local_custom_endpoint_key_and_timeout(tmp_path, fake_source, monkeypatch):
+    monkeypatch.setenv("BILIQUILL_PROVIDER", "local")
+    monkeypatch.setenv("BILIQUILL_LOCAL_API_KEY", "local-only-key")
+    seen = []
+    original_init = LLM.__init__
+
+    def init(self, base_url, api_key, *args, **kwargs):
+        seen.append((base_url, api_key, kwargs))
+        original_init(self, base_url, api_key, *args, **kwargs)
+
+    monkeypatch.setattr(LLM, "__init__", init)
+    monkeypatch.setattr(cli, "summarize", lambda *a, **k: ("Summary", "Chapters"))
+    assert (
+        cli.main(
+            [
+                URL,
+                "-o",
+                str(tmp_path),
+                "--model",
+                "model.gguf",
+                "--base-url",
+                "http://localhost:8080/v1",
+                "--llm-timeout",
+                "900",
+            ]
+        )
+        == 0
+    )
+    assert seen[0][0:2] == ("http://localhost:8080/v1", "local-only-key")
+    assert seen[0][2]["timeout"] == 900
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["--llm-timeout", "nan"],
+        ["--llm-timeout", "0"],
+        ["--provider", "local", "--context-size", "8192"],
+        ["--provider", "ollama", "--context-size", "-1"],
+    ],
+)
+def test_invalid_local_options_fail_before_download(monkeypatch, options):
+    monkeypatch.setattr(cli, "acquire", lambda *a, **k: pytest.fail("Must validate first"))
+    assert cli.main([URL, "--model", "test", *options]) == 1
+
+
 def test_llm_invalid_json_not_cached_and_auth_fails_fast(tmp_path, monkeypatch):
     monkeypatch.setattr("biliquill.llm.time.sleep", lambda _: None)
     replies = iter(["bad json", json.dumps(note())])

@@ -4,7 +4,7 @@
 
 A small quill for long Bilibili videos.
 
-Give it a URL. It tries existing captions first, downloads audio with yt-dlp when needed, transcribes locally on your GPU, and uses an OpenAI-compatible LLM to write timestamped notes.
+Give it a URL. It tries existing captions first, downloads audio with yt-dlp when needed, transcribes locally on your GPU, and uses a local or hosted LLM to write timestamped notes.
 
 ```text
 Bilibili URL → existing captions ──────────┐
@@ -50,6 +50,35 @@ uv run biliquill 'https://www.bilibili.com/video/BV13Wf2B8ET6'
 If installed with `uv tool install`, run `biliquill URL` directly. `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL` are accepted as fallbacks; `BILIQUILL_*` takes precedence. No particular model is assumed. `.env.example` documents the settings; `.env` files are not automatically loaded.
 
 The client uses `POST <base-url>/chat/completions`. Your model must accept system/user messages and follow JSON instructions. No vendor-specific structured-output parameters are required. Keys are optional for local endpoints that do not require authentication.
+
+### Local models
+
+Select a model already installed in your local server. No cloud API key is needed.
+
+```bash
+# Native Ollama API; start Ollama and download a model beforehand
+ollama list
+uv run biliquill URL --provider ollama --model YOUR_INSTALLED_MODEL
+
+# LM Studio: load a model and start its local API server
+uv run biliquill URL --provider local --model YOUR_LOADED_MODEL
+
+# llama.cpp or another OpenAI-compatible local server
+uv run biliquill URL --provider local --model YOUR_SERVED_MODEL \
+  --base-url http://localhost:8080/v1
+
+# Chinese notes with a smaller Ollama context and smaller input chunks
+uv run biliquill URL --provider ollama --model YOUR_INSTALLED_MODEL \
+  --notes-language zh --context-size 8192 --chunk-chars 2000 --reduce-chars 4000
+```
+
+`--provider ollama` defaults to `http://localhost:11434/api/chat`; use the server root or `/api` as `--base-url`. It disables streaming, requests JSON for chunk notes, and leaves the final Markdown synthesis unconstrained. `--context-size` sets Ollama's `num_ctx` (default: 16384 tokens). Smaller windows may require smaller chunk/reduction limits and shorter outputs.
+
+`--provider local` uses the same Chat Completions protocol as the hosted client, with a default base URL of `http://localhost:1234/v1`. It works with local servers that implement that protocol; it does not load GGUF or Transformers model files directly. Start the server and load/download your model first. The tool does not start servers or download LLM weights.
+
+Set `BILIQUILL_PROVIDER=ollama` or `local` to make a backend your default. Local modes use their own optional `BILIQUILL_OLLAMA_BASE_URL` / `BILIQUILL_LOCAL_BASE_URL` settings and do not inherit cloud base URLs or keys. An explicit `--base-url` takes precedence. For authenticated local proxies, use `BILIQUILL_OLLAMA_API_KEY` or `BILIQUILL_LOCAL_API_KEY`.
+
+LLM requests allow 600 seconds by default, including initial model loading; override with `--llm-timeout 900`. Summarization stays on the configured local server; acquiring the video still requires Bilibili access. The local model must follow JSON instructions and provide usable final content.
 
 The default output directory is `output/<video-id>/`; `?p=2` gets a separate `<video-id>-p2` directory:
 
@@ -122,6 +151,7 @@ Tests cover caption-first acquisition and audio fallback, comment exclusion, chu
 - [yt-dlp Python embedding](https://github.com/yt-dlp/yt-dlp#embedding-yt-dlp)
 - [faster-whisper GPU requirements](https://github.com/SYSTRAN/faster-whisper#gpu)
 - [OpenAI Docs: Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)
+- [Ollama native Chat API](https://docs.ollama.com/api/chat)
 
 ## License
 

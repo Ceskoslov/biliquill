@@ -27,12 +27,20 @@ class LLM:
         *,
         refresh: bool = False,
         language: str = "en",
+        provider: str = "openai",
+        timeout: float = 600,
+        context_size: int | None = None,
     ):
         self.model, self.cache, self.refresh = model, cache, refresh
         self.language = language
-        self.url = base_url.rstrip("/") + "/chat/completions"
+        self.provider, self.context_size = provider, context_size
+        if provider == "ollama":
+            root = base_url.rstrip("/")
+            self.url = root + ("/chat" if root.endswith("/api") else "/api/chat")
+        else:
+            self.url = base_url.rstrip("/") + "/chat/completions"
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-        self.client = httpx.Client(headers=headers, timeout=httpx.Timeout(180, connect=20))
+        self.client = httpx.Client(headers=headers, timeout=httpx.Timeout(timeout, connect=20))
 
     def close(self):
         self.client.close()
@@ -46,6 +54,10 @@ class LLM:
                 {"role": "user", "content": prompt},
             ],
         }
+        if self.provider == "ollama":
+            payload.update(stream=False, options={"num_ctx": self.context_size or 16384})
+            if validate:
+                payload["format"] = "json"
         key = fingerprint({"endpoint": self.url, "payload": payload})
         path = self.cache / f"llm-{key}.txt"
         if path.exists() and not self.refresh:
@@ -60,18 +72,28 @@ class LLM:
                 if response.status_code in {408, 429} or response.status_code >= 500:
                     last_error = f"HTTP {response.status_code}"
                 elif response.is_error:
-                    raise QuillError(
-                        f"LLM returned HTTP {response.status_code}; "
-                        "check your API key, base URL, and model name"
+                    hint = (
+                        "ensure the model is downloaded with ollama pull and check the base URL"
+                        if self.provider == "ollama"
+                        else "check your API key, base URL, and model name"
                     )
+                    raise QuillError(f"LLM returned HTTP {response.status_code}; {hint}")
                 else:
-                    choice = response.json()["choices"][0]
-                    if choice.get("finish_reason") == "length":
+                    data = response.json()
+                    if self.provider == "ollama":
+                        if data.get("done") is not True:
+                            raise ValueError("Ollama returned an incomplete response")
+                        result = data["message"]["content"]
+                        finish_reason = data.get("done_reason")
+                    else:
+                        choice = data["choices"][0]
+                        result = choice["message"]["content"]
+                        finish_reason = choice.get("finish_reason")
+                    if finish_reason == "length":
                         raise ValueError(
                             "LLM output was truncated; lower --chunk-chars "
                             "or increase the provider's output limit"
                         )
-                    result = choice["message"]["content"]
                     if not isinstance(result, str) or not result.strip():
                         raise ValueError("LLM returned empty content")
                     result = result.strip()
